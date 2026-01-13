@@ -15,7 +15,7 @@ def read_rfid_file():
         with open(RFID_FILE, 'r') as file:
             rfid_map = json.load(file)
     except FileNotFoundError:
-        print("Error: c file not found, creating a new rfid_map file.")
+        print("Error: file not found, creating a new rfid_map file.")
     except json.JSONDecodeError as e:
         print(f"Error decoding JSON: {e}")
     return rfid_map

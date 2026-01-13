@@ -4,3 +4,4 @@ gpiozero
 spidev
 pyyaml
 python-dotenv
+rpi-lgpio

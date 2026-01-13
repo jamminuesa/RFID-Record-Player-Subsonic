@@ -7,12 +7,32 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Creating virtual environment"
+echo "Installing system dependencies"
+sudo apt-get install -y swig liblgpio-dev > /dev/null
+
+echo "Creating python virtual environment"
 python3 -m venv venv
 source venv/bin/activate
 
 echo "Installing python dependencies"
 pip install -r install/requirements.txt -qq > /dev/null
 
-echo "Running setup script"
-python3 install/setup.py
+echo "Enabling SPI Interface"
+sudo sed -i 's/^dtparam=spi=.*/dtparam=spi=on/' /boot/config.txt
+sudo sed -i 's/^#dtparam=spi=.*/dtparam=spi=on/' /boot/config.txt
+sudo raspi-config nonint do_spi 0
+
+read -p "Would you like to restart your Raspberry Pi now? [Y/N] " userInput
+userInput="${userInput^^}"
+
+if [[ "${userInput,,}" == "y" ]]; then
+    echo "You entered 'Y', rebooting now..."
+    sleep 2
+    sudo reboot now
+elif [[ "${userInput,,}" == "n" ]]; then
+    echo "Please restart your Raspberry Pi later to apply changes by running 'sudo reboot now'."
+    exit
+else
+    echo "Unknown input, please restart your Raspberry Pi later to apply changes by running 'sudo reboot now'."
+    sleep 1
+fi

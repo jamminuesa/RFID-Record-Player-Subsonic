@@ -6,6 +6,7 @@ import time
 import spotipy
 from dotenv import load_dotenv
 from gpiozero import DigitalInputDevice, DigitalOutputDevice
+from gpiozero.pins.lgpio import LGPIOFactory
 from mfrc522 import SimpleMFRC522
 from spotipy.cache_handler import MemoryCacheHandler
 from spotipy.oauth2 import SpotifyOAuth
@@ -178,10 +179,11 @@ class RecordPlayer:
                 self.spotify.play(rfid_id)
 
 def main():
+    print("Starting Record Player")
     spotify = SpotifyController()
     motor = StepperMotor()
     rfid = SimpleMFRC522()
-    hall_sensor = DigitalInputDevice(HALL_SENSOR_PIN, pull_up=True)
+    hall_sensor = DigitalInputDevice(HALL_SENSOR_PIN, pull_up=True, pin_factory=LGPIOFactory())
 
     player = RecordPlayer(
         spotify=spotify,
