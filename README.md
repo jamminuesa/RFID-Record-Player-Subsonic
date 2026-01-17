@@ -23,6 +23,9 @@ Features RFID detection of tagged records for Spotify content, a stepper motor�
 
 The .3MF files for printing the enclosure and other parts of the Record Player are available here: [RFID Record Player 3D Files](https://www.patreon.com/posts/148251861)
 
+## Tutorial
+
+See the [YouTube tutorial](https://youtu.be/fBjv4E7mpA4) for a full walkthrough of the components, wiring, assembly, and software setup.
 
 ## Wiring Diagram
 
@@ -41,6 +44,7 @@ The .3MF files for printing the enclosure and other parts of the Record Player a
 | Pin 6 (GND)      | GND         |
 
 Note: It's usually not recommended to power the stepper motor directly from the Pi’s 5 V pin — use an external battery source or a good power supply with atleast 2A.
+The stepper motor may become hot after long periods of use.
 
 ### RC522 RFID Reader (SPI)
 
