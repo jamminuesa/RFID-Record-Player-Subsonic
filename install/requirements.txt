@@ -1,7 +1,8 @@
 mfrc522
-spotipy
 gpiozero
 spidev
 pyyaml
 python-dotenv
 rpi-lgpio
+py-sonic
+python-vlc
