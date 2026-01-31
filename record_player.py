@@ -2,119 +2,185 @@ import json
 import os
 import RPi.GPIO as GPIO
 import threading
+import sys
 import time
-import spotipy
+import libsonic
+import vlc
+import hashlib
+import string
+import random
+from urllib.parse import quote
 from dotenv import load_dotenv
 from gpiozero import DigitalInputDevice, DigitalOutputDevice
 from gpiozero.pins.lgpio import LGPIOFactory
 from mfrc522 import SimpleMFRC522
-from spotipy.cache_handler import MemoryCacheHandler
-from spotipy.oauth2 import SpotifyOAuth
 
+# --- CONFIGURACIÓN DE HARDWARE ---
 HALL_SENSOR_PIN = 17
 STEPPER_PINS = [14, 15, 18, 23]
+
+# --- GESTIÓN DE RUTAS ---
+ENV_FILE = ".env"
 RFID_FILE = "rfid.json"
 
-class SpotifyController:
+class NavidromeController:
     def __init__(self):
-        self.init_spotify_client()
-        self.init_rfid_map()
-        self.playback_cache = {}
-    
-    def init_spotify_client(self):
-        load_dotenv()
+        self.load_config()
+        self.init_navidrome()
+        self.init_vlc()
+        self.rfid_map = self.load_rfid_map()
+        self.current_uri = None
 
-        client_id = os.getenv("SPOTIFY_CLIENT_ID")
-        client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-        refresh_token = os.getenv("SPOTIFY_REFRESH_TOKEN")
-        redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI")
-        
-        if not all([client_id, client_secret, refresh_token, redirect_uri]):
-            print("Error: spotify secrets are not set.")
+    def load_config(self):
+        load_dotenv(ENV_FILE)
+        self.server = os.getenv("NAVIDROME_URL")
+        self.user = os.getenv("NAVIDROME_USER")
+        self.password = os.getenv("NAVIDROME_PASS")
+
+        if not all([self.server, self.user, self.password]):
+            print("❌ Error: Faltan credenciales en el archivo .env")
             sys.exit(1)
 
-        auth = SpotifyOAuth(
-            client_id=client_id,
-            client_secret=client_secret,
-            redirect_uri=refresh_token,
-            scope='user-read-playback-state,user-modify-playback-state',
-            open_browser=False,
-            cache_handler=MemoryCacheHandler(),
-        )
-        auth.refresh_access_token(refresh_token)
-        self.sp = spotipy.Spotify(auth_manager=auth)
-    
-    def init_rfid_map(self):
-        rfid_map = {}
+    def init_navidrome(self):
+        try:
+            print(f"📡 Conectando a Navidrome: {self.server}")
+            self.conn = libsonic.Connection(
+                self.server,
+                self.user,
+                self.password,
+                port = 443,
+                appName="RPiRecordPlayer"
+            )
+            # Pequeño ping para verificar
+            if not self.conn.ping():
+                print("⚠️ Advertencia: El servidor Navidrome no responde al ping.")
+        except Exception as e:
+            print(f"❌ Error conectando a Navidrome: {e}")
+
+    def init_vlc(self):
+        # Usamos '--aout=alsa' si es necesario forzar, pero pipewire suele manejarlo bien
+        # Inicializamos el reproductor de LISTAS (MediaListPlayer)
+        self.vlc_instance = vlc.Instance()
+        self.list_player = self.vlc_instance.media_list_player_new()
+        self.player = self.list_player.get_media_player() # Acceso al reproductor subyacente
+
+    def load_rfid_map(self):
         try:
             with open(RFID_FILE, 'r') as file:
-                rfid_map = json.load(file)
-            if not rfid_map:
-                print("Warning: RFID map is empty.")
-        except FileNotFoundError:
-            print(f"Warning: RFID map file {RFID_FILE} not found.")
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON: {e}")
-        self.rfid_map = rfid_map
+                return json.load(file)
+        except (FileNotFoundError, json.JSONDecodeError):
+            print("⚠️ No se pudo leer rfid.json o está vacío.")
+            return {}
+
+    def _get_auth_params(self):
+        """Genera los parámetros de autenticación para la URL de streaming"""
+        salt = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(6))
+        token = hashlib.md5((self.password + salt).encode('utf-8')).hexdigest()
+        return f"u={quote(self.user)}&t={token}&s={salt}&v=1.16.1&c=RPiPlayer"
+
+    def fetch_songs(self, uri):
+        """Devuelve una lista de diccionarios de canciones basada en la URI"""
+        # uri formato: navidrome:tipo:id
+        try:
+            parts = uri.split(":")
+            if len(parts) != 3: return []
+
+            otype, oid = parts[1], parts[2]
+            songs = []
+
+            if otype == "album":
+                print(f"📥 Obteniendo álbum ID {oid}...")
+                album = self.conn.getAlbum(oid)
+                if 'album' in album and 'song' in album['album']:
+                    songs = album['album']['song']
+
+            elif otype == "playlist":
+                print(f"📥 Obteniendo playlist ID {oid}...")
+                pl = self.conn.getPlaylist(oid)
+                if 'playlist' in pl and 'entry' in pl['playlist']:
+                    songs = pl['playlist']['entry']
+
+            elif otype == "artist":
+                artist = self.conn.getArtist(oid)
+                artist_name = artist['artist']['name']
+                print(f"📥 Obteniendo Top Songs del artista {artist_name} ...")
+
+                results = self.conn.search3(artist_name)
+                search_result = results.get('searchResult3', {})
+
+                # 🔹 Obtener solo canciones
+                just_songs = search_result.get('song', [])
+
+                # 🔹 Filtrar por artista exacto
+                songs = [
+                    song for song in just_songs
+                        if song.get('artist') == artist_name
+                ]
+
+            return songs
+        except Exception as e:
+            print(f"❌ Error obteniendo canciones: {e}")
+            return []
 
     def play(self, rfid_id):
-        print(f"Starting playback")
         uri = self.rfid_map.get(str(rfid_id))
+
         if not uri:
-            print(f"No Spotify URI mapped to RFID {rfid_id}")
+            print(f"⚠️ Etiqueta {rfid_id} no configurada.")
             return
 
-        spotify_args = {}
-        if uri.startswith("spotify:track:"):
-            spotify_args["uris"] = [uri]
-            if uri == self.playback_cache.get("track_uri"):
-                print("Track URI is same, resuming playback")
-                spotify_args["position_ms"] = self.playback_cache.get("progress_ms")
-        else:
-            spotify_args["context_uri"] = uri
-            if uri == self.playback_cache.get("context_uri"):
-                if uri.startswith("spotify:artist:"):
-                    print("Context URI is artist, unable to resume playback ")
-                else:
-                    print("Context URI is same, resuming playback")
-                    spotify_args["offset"] = { "uri": self.playback_cache.get("track_uri") }
-                    spotify_args["position_ms"] = self.playback_cache.get("progress_ms")
-        print(f"Start playback args: {spotify_args}")
-        try:
-            self.sp.start_playback(**spotify_args)
-        except Exception as e:
-            print(f"Failed to start playback: {e}")
+        if uri == self.current_uri and self.list_player.is_playing():
+            print("🔄 Misma etiqueta, ignorando...")
+            return
+
+        print(f"▶️ Nueva etiqueta detectada: {uri}")
+        self.current_uri = uri
+
+        # 1. Obtener canciones
+        songs = self.fetch_songs(uri)
+        if not songs:
+            print("❌ No se encontraron canciones para reproducir.")
+            return
+
+        # 2. Crear lista de reproducción VLC
+        media_list = self.vlc_instance.media_list_new()
+        auth_params = self._get_auth_params()
+
+        print(f"🎵 Cargando {len(songs)} canciones en cola...")
+
+        for song in songs:
+            # Construir URL completa con autenticación
+            stream_url = f"{self.server}/rest/stream?id={song['id']}&{auth_params}"
+            media = self.vlc_instance.media_new(stream_url)
+            media_list.add_media(media)
+
+        # 3. Asignar y reproducir
+        self.list_player.set_media_list(media_list)
+        self.list_player.play()
+        print("🔊 Reproduciendo...")
 
     def pause(self):
-        try:
-            self.sp.pause_playback()
-        except Exception as e:
-            print(f"Failed to pause playback: {e}")
-        self.store_playback()
-    
-    def store_playback(self):
-        playback = self.sp.current_playback()
-        context = playback.get("context") or {}
-        self.playback_cache = {
-            "type": context.get("type"),
-            "context_uri": context.get("uri"),
-            "progress_ms": playback.get("progress_ms") or 0,
-            "track_uri": playback.get("item", {}).get("uri"),
-        }
-        print(f"Stored playback: {self.playback_cache}")
+        """Pausa o detiene la reproducción (simulando levantar la aguja)"""
+        if self.list_player.is_playing():
+            print("⏸️ Pausando reproducción...")
+            self.list_player.pause() # O usar .stop() si quieres reiniciar al poner la aguja
+
+    def resume(self):
+        """Reanuda si estaba pausado"""
+        if not self.list_player.is_playing() and self.current_uri:
+             print("▶️ Reanudando...")
+             self.list_player.play()
+
+    def stop(self):
+        self.list_player.stop()
+        self.current_uri = None
 
 class StepperMotor:
     STEP_SEQUENCE = [
-        [1,0,0,1],
-        [1,0,0,0],
-        [1,1,0,0],
-        [0,1,0,0],
-        [0,1,1,0],
-        [0,0,1,0],
-        [0,0,1,1],
-        [0,0,0,1],
+        [1,0,0,1], [1,0,0,0], [1,1,0,0], [0,1,0,0],
+        [0,1,1,0], [0,0,1,0], [0,0,1,1], [0,0,0,1],
     ]
-    STEP_DELAY = 0.002
+    STEP_DELAY = 0.002 # Ajustar velocidad aquí
 
     def __init__(self):
         self.pins = [DigitalOutputDevice(pin) for pin in STEPPER_PINS]
@@ -122,14 +188,14 @@ class StepperMotor:
         self._thread = None
 
     def _run(self):
-        print("Stepper motor thread started")
+        print("⚙️ Motor: Iniciando giro")
         while self._running:
             for step in self.STEP_SEQUENCE:
                 for pin, value in zip(self.pins, step):
                     pin.value = value
                 time.sleep(self.STEP_DELAY)
         self._stop_pins()
-        print("Stepper motor thread stopped")
+        print("⚙️ Motor: Detenido")
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -145,10 +211,51 @@ class StepperMotor:
         for pin in self.pins:
             pin.off()
 
+class FakeHallSensor:
+    def __init__(self):
+        self.value = False
+
+    def activate(self):
+        if not self.value: # Solo imprimir si cambia el estado
+            print("\n🧪 [MOCK] Brazo bajado (Imán detectado)")
+            self.value = True
+
+    def deactivate(self):
+        if self.value:
+            print("\n🧪 [MOCK] Brazo levantado (Sin imán)")
+            self.value = False
+
+class FakeRFID:
+    def __init__(self):
+        self.fake_id = None
+        self._last_read_id = None
+
+    def read_id_no_block(self):
+        # Simula comportamiento real: devuelve el ID mientras la tarjeta esté cerca
+        return self.fake_id
+
+    def set_id(self, new_id):
+        if self.fake_id != new_id:
+            print(f"🧪 [MOCK] Acercando etiqueta RFID: {new_id}")
+            self.fake_id = new_id
+
+    def remove_card(self):
+        if self.fake_id is not None:
+            print("🧪 [MOCK] Retirando etiqueta RFID")
+            self.fake_id = None
+
+class FakeMotor:
+    def start(self):
+        print("⚙️ [MOCK] Motor: GIRANDO")
+
+    def stop(self):
+        print("⚙️ [MOCK] Motor: DETENIDO")
+
+
 
 class RecordPlayer:
-    def __init__(self, spotify, motor, rfid, hall_sensor):
-        self.spotify = spotify
+    def __init__(self, audio_controller, motor, rfid, hall_sensor):
+        self.audio = audio_controller
         self.motor = motor
         self.rfid = rfid
         self.hall_sensor = hall_sensor
@@ -157,50 +264,143 @@ class RecordPlayer:
         self.spinning = False
 
     def update(self):
+        # Leemos el sensor Hall (Brazo del tocadiscos)
+        # Nota: pull_up=True significa que detecta imán cuando va a tierra (0) o viceversa
+        # Ajusta lógica según tu montaje físico del sensor
         magnet_detected = self.hall_sensor.value
 
+        # ESTADO: COMIENZA A GIRAR (Brazo se mueve hacia el disco)
         if magnet_detected and not self.spinning:
-            print("Magnet detected → start")
+            print("🧲 Brazo activado -> Arrancando motor")
             self.spinning = True
             self.motor.start()
+            # Si había música pausada, intentamos reanudar
+            self.audio.resume()
 
+        # ESTADO: PARA DE GIRAR (Brazo vuelve al reposo)
         elif not magnet_detected and self.spinning:
-            print("Magnet lost → stop")
+            print("🧲 Brazo desactivado -> Deteniendo")
             self.spinning = False
             self.current_rfid = None
             self.motor.stop()
-            self.spotify.pause()
+            self.audio.pause() # O self.audio.stop() para resetear totalmente
 
+        # MIENTRAS GIRA: Escanear etiquetas
         if self.spinning:
             rfid_id = self.rfid.read_id_no_block()
             if rfid_id and rfid_id != self.current_rfid:
-                print(f"RFID changed: {rfid_id}")
+                print(f"🏷️ Etiqueta detectada: {rfid_id}")
                 self.current_rfid = rfid_id
-                self.spotify.play(rfid_id)
+                self.audio.play(rfid_id)
 
 def main():
-    print("Starting Record Player")
-    spotify = SpotifyController()
-    motor = StepperMotor()
-    rfid = SimpleMFRC522()
-    hall_sensor = DigitalInputDevice(HALL_SENSOR_PIN, pull_up=True, pin_factory=LGPIOFactory())
+    print("=========================================")
+    print("   RPi Navidrome Record Player v2.0      ")
+    print("=========================================")
 
-    player = RecordPlayer(
-        spotify=spotify,
-        motor=motor,
-        rfid=rfid,
-        hall_sensor=hall_sensor,
-    )
-
+    # Inicializar controladores
     try:
+        navidrome = NavidromeController()
+        motor = StepperMotor()
+        rfid = SimpleMFRC522()
+        # Ajustar pin_factory si da problemas en Pi Zero 2, LGPIO es el estándar moderno
+        hall_sensor = DigitalInputDevice(HALL_SENSOR_PIN, pull_up=True, pin_factory=LGPIOFactory())
+
+        player = RecordPlayer(
+            audio_controller=navidrome,
+            motor=motor,
+            rfid=rfid,
+            hall_sensor=hall_sensor,
+        )
+
+        print("✅ Sistema listo. Esperando acción del brazo...")
+
         while True:
             player.update()
             time.sleep(0.1)
+
     except KeyboardInterrupt:
-        print("Shutting down...")
+        print("\n👋 Apagando sistema...")
+    except Exception as e:
+        print(f"❌ Error inesperado: {e}")
     finally:
-        motor.stop()
-        GPIO.cleanup()
+        if 'motor' in locals(): motor.stop()
+        # GPIO cleanup a veces es redundante con gpiozero, pero por seguridad si usas librerías mixtas
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.cleanup()
+        except:
+            pass
+
+def main_test():
+    print("=========================================")
+    print("   MODO TEST: SIMULACIÓN DE HARDWARE     ")
+    print("=========================================")
+
+    navidrome = NavidromeController()
+    motor = FakeMotor()        # o StepperMotor si quieres
+    rfid = FakeRFID() # ID existente en rfid.json
+    hall_sensor = FakeHallSensor()
+
+    player = RecordPlayer(
+            audio_controller=navidrome,
+            motor=motor,
+            rfid=rfid,
+            hall_sensor=hall_sensor,
+        )
+# Variables para controlar la línea de tiempo
+    start_time = time.time()
+
+    # Flags para que los eventos del test ocurran solo una vez
+    events_triggered = {
+        "arm_down": False,
+        "card_scan": False,
+        "arm_up": False
+    }
+
+    print("⏱️ Iniciando línea de tiempo...")
+
+    try:
+        while True:
+            # 1. Ejecutar la lógica del reproductor (lo que haría la RPi)
+            player.update()
+
+            # 2. Calcular tiempo transcurrido
+            elapsed = time.time() - start_time
+
+            # --- GUIÓN DE LA PRUEBA (TIMELINE) ---
+
+            # T+2s: Bajar el brazo (Activar sensor)
+            if elapsed > 2 and not events_triggered["arm_down"]:
+                hall_sensor.activate()
+                events_triggered["arm_down"] = True
+
+            # T+4s: Colocar tarjeta RFID (ID de prueba que tengas en rfid.json)
+            # Asegúrate de poner aquí un ID que exista en tu archivo
+            if elapsed > 4 and not events_triggered["card_scan"]:
+                rfid.set_id(856425748622)
+                events_triggered["card_scan"] = True
+
+            # T+20s: Levantar el brazo (Canción termina o usuario para)
+            if elapsed > 20 and not events_triggered["arm_up"]:
+                hall_sensor.deactivate()
+                # Opcional: Retirar tarjeta también
+                rfid.remove_card()
+                events_triggered["arm_up"] = True
+                print("\n✅ Test finalizado. Saliendo en 3 segundos...")
+
+            # Salir del script poco después de terminar
+            if elapsed > 23:
+                break
+
+            # Pequeña pausa para no saturar la CPU
+            time.sleep(0.1)
+
+    except KeyboardInterrupt:
+        print("\nTest cancelado por usuario.")
 
 if __name__ == "__main__":
-    main()
+    if os.getenv("MODE") == "test":
+        main_test()
+    else:
+        main()
