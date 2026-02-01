@@ -12,9 +12,9 @@ from dotenv import load_dotenv
 # Cargar credenciales
 load_dotenv()
 
-SERVER = os.getenv("NAVIDROME_URL")
-USER = os.getenv("NAVIDROME_USER")
-PASS = os.getenv("NAVIDROME_PASS")
+SERVER = os.getenv("SUBSONIC_URL")
+USER = os.getenv("SUBSONIC_USER")
+PASS = os.getenv("SUBSONIC_PASS")
 
 def generate_salt(length=8):
     """
@@ -74,7 +74,7 @@ def main():
 
     print(f"📡 Conectando a {SERVER} con usuario {USER}...")
 
-    # 1. Conexión con Navidrome
+    # 1. Conexión con Subsonic
     try:
         conn = libsonic.Connection(SERVER, USER, PASS, port=443, appName="RPiPlayer")
         if not conn.ping():
@@ -92,7 +92,7 @@ def main():
         first_song = conn.getRandomSongs(size=1)
 
     except Exception as e:
-        print(f"❌ Error recuperando datos de Navidrome: {e}")
+        print(f"❌ Error recuperando datos de Subsonic: {e}")
         return
 
     # 3. Configurar VLC y Reproducir

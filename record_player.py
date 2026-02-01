@@ -23,39 +23,40 @@ STEPPER_PINS = [14, 15, 18, 23]
 ENV_FILE = ".env"
 RFID_FILE = "rfid.json"
 
-class NavidromeController:
+class SubsonicController:
     def __init__(self):
         self.load_config()
-        self.init_navidrome()
+        self.init_subsonic()
         self.init_vlc()
         self.rfid_map = self.load_rfid_map()
         self.current_uri = None
 
     def load_config(self):
         load_dotenv(ENV_FILE)
-        self.server = os.getenv("NAVIDROME_URL")
-        self.user = os.getenv("NAVIDROME_USER")
-        self.password = os.getenv("NAVIDROME_PASS")
+        self.server = os.getenv("SUBSONIC_URL")
+        self.user = os.getenv("SUBSONIC_USER")
+        self.password = os.getenv("SUBSONIC_PASS")
+        self.port = os.getenv("SUBSONIC_PORT")
 
         if not all([self.server, self.user, self.password]):
             print("❌ Error: Faltan credenciales en el archivo .env")
             sys.exit(1)
 
-    def init_navidrome(self):
+    def init_subsonic(self):
         try:
-            print(f"📡 Conectando a Navidrome: {self.server}")
+            print(f"📡 Conectando a Subsonic: {self.server}")
             self.conn = libsonic.Connection(
                 self.server,
                 self.user,
                 self.password,
-                port = 443,
-                appName="RPiRecordPlayer"
+                port = self.port,
+                appName="JukePi"
             )
             # Pequeño ping para verificar
             if not self.conn.ping():
-                print("⚠️ Advertencia: El servidor Navidrome no responde al ping.")
+                print("⚠️ Advertencia: El servidor Subsonic no responde al ping.")
         except Exception as e:
-            print(f"❌ Error conectando a Navidrome: {e}")
+            print(f"❌ Error conectando a Subsonic: {e}")
 
     def init_vlc(self):
         # Usamos '--aout=alsa' si es necesario forzar, pero pipewire suele manejarlo bien
@@ -80,7 +81,7 @@ class NavidromeController:
 
     def fetch_songs(self, uri):
         """Devuelve una lista de diccionarios de canciones basada en la URI"""
-        # uri formato: navidrome:tipo:id
+        # uri formato: subsonic:tipo:id
         try:
             parts = uri.split(":")
             if len(parts) != 3: return []
@@ -103,7 +104,7 @@ class NavidromeController:
             elif otype == "artist":
                 artist = self.conn.getArtist(oid)
                 artist_name = artist['artist']['name']
-                print(f"📥 Obteniendo Top Songs del artista {artist_name} ...")
+                print(f"📥 Obteniendo canciones del artista {artist_name} ...")
 
                 results = self.conn.search3(artist_name)
                 search_result = results.get('searchResult3', {})
@@ -116,6 +117,7 @@ class NavidromeController:
                     song for song in just_songs
                         if song.get('artist') == artist_name
                 ]
+                random.shuffle(songs)
 
             return songs
         except Exception as e:
@@ -129,7 +131,7 @@ class NavidromeController:
             print(f"⚠️ Etiqueta {rfid_id} no configurada.")
             return
 
-        if uri == self.current_uri and self.list_player.is_playing():
+        if uri == self.current_uri:
             print("🔄 Misma etiqueta, ignorando...")
             return
 
@@ -281,7 +283,6 @@ class RecordPlayer:
         elif not magnet_detected and self.spinning:
             print("🧲 Brazo desactivado -> Deteniendo")
             self.spinning = False
-            self.current_rfid = None
             self.motor.stop()
             self.audio.pause() # O self.audio.stop() para resetear totalmente
 
@@ -295,19 +296,19 @@ class RecordPlayer:
 
 def main():
     print("=========================================")
-    print("   RPi Navidrome Record Player v2.0      ")
+    print("   RPi Subsonic Record Player v2.0      ")
     print("=========================================")
 
     # Inicializar controladores
     try:
-        navidrome = NavidromeController()
+        subsonic = SubsonicController()
         motor = StepperMotor()
         rfid = SimpleMFRC522()
         # Ajustar pin_factory si da problemas en Pi Zero 2, LGPIO es el estándar moderno
         hall_sensor = DigitalInputDevice(HALL_SENSOR_PIN, pull_up=True, pin_factory=LGPIOFactory())
 
         player = RecordPlayer(
-            audio_controller=navidrome,
+            audio_controller=subsonic,
             motor=motor,
             rfid=rfid,
             hall_sensor=hall_sensor,
@@ -337,13 +338,13 @@ def main_test():
     print("   MODO TEST: SIMULACIÓN DE HARDWARE     ")
     print("=========================================")
 
-    navidrome = NavidromeController()
+    subsonic = SubsonicController()
     motor = FakeMotor()        # o StepperMotor si quieres
     rfid = FakeRFID() # ID existente en rfid.json
     hall_sensor = FakeHallSensor()
 
     player = RecordPlayer(
-            audio_controller=navidrome,
+            audio_controller=subsonic,
             motor=motor,
             rfid=rfid,
             hall_sensor=hall_sensor,
@@ -355,7 +356,8 @@ def main_test():
     events_triggered = {
         "arm_down": False,
         "card_scan": False,
-        "arm_up": False
+        "arm_up": False,
+        "arm_down2": False
     }
 
     print("⏱️ Iniciando línea de tiempo...")
@@ -384,13 +386,15 @@ def main_test():
             # T+20s: Levantar el brazo (Canción termina o usuario para)
             if elapsed > 20 and not events_triggered["arm_up"]:
                 hall_sensor.deactivate()
-                # Opcional: Retirar tarjeta también
-                rfid.remove_card()
                 events_triggered["arm_up"] = True
                 print("\n✅ Test finalizado. Saliendo en 3 segundos...")
 
+            if elapsed > 30 and not events_triggered["arm_down2"]:
+                hall_sensor.activate()
+                events_triggered["arm_down2"] = True
+
             # Salir del script poco después de terminar
-            if elapsed > 23:
+            if elapsed > 40:
                 break
 
             # Pequeña pausa para no saturar la CPU
