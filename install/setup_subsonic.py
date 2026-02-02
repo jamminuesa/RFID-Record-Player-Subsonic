@@ -3,6 +3,9 @@ import json
 import time
 import os
 import libsonic
+import subprocess
+import atexit
+import signal
 from dotenv import load_dotenv
 from pathlib import Path
 from mfrc522 import SimpleMFRC522
@@ -25,6 +28,22 @@ SERVER = os.getenv("SUBSONIC_URL")
 PORT = os.getenv("SUBSONIC_PORT")
 USER = os.getenv("SUBSONIC_USER")
 PASS = os.getenv("SUBSONIC_PASS")
+
+SERVICE_NAME = "recordplayer"
+
+def stop_recordplayer():
+    print(f"⏹ Parando servicio {SERVICE_NAME}...")
+    subprocess.run(
+        ["sudo", "systemctl", "stop", SERVICE_NAME],
+        check=False
+    )
+
+def start_recordplayer():
+    print(f"▶ Arrancando servicio  {SERVICE_NAME}...")
+    subprocess.run(
+        ["sudo", "systemctl", "start", SERVICE_NAME],
+        check=False
+    )
 
 def connect_subsonic():
     """Establece conexión con el servidor Subsonic"""
@@ -125,7 +144,7 @@ def select_item(items, type_label):
             print("❌ Por favor introduce un número.")
 
 def write_rfid_tags(conn):
-    #rfid_reader = SimpleMFRC522()
+    rfid = SimpleMFRC522()
     rfid_map = read_rfid_file()
 
     while True:
@@ -135,8 +154,7 @@ def write_rfid_tags(conn):
         print("Acerca una tarjeta o llavero al lector...")
 
         try:
-            rfid_id = 856425748622 #rfid_id, _ = rfid_reader.read() # read() devuelve id y texto, solo queremos ID
-            rfid_id = str(rfid_id)
+            rfid_id = str(rfid.read_id())
             print(f"🔔 ¡Etiqueta detectada! ID: {rfid_id}")
 
             # Verificar si ya existe
@@ -193,8 +211,7 @@ def read_rfid_mode():
 
     try:
         while True:
-            rfid_id, _ = rfid.read()
-            rfid_id = str(rfid_id)
+            rfid_id = str(rfid.read_id())
             if rfid_id in rfid_map:
                 print(f"ID: {rfid_id} -> {rfid_map[rfid_id]}")
             else:
@@ -202,6 +219,10 @@ def read_rfid_mode():
             time.sleep(1)
     except KeyboardInterrupt:
         return
+
+def cleanup_and_exit(signum=None, frame=None):
+    start_recordplayer()
+    sys.exit(0)
 
 def main():
     conn = connect_subsonic()
@@ -225,4 +246,14 @@ def main():
             print("Opción inválida")
 
 if __name__ == "__main__":
+        # Parar el servicio al iniciar el script
+    stop_recordplayer()
+
+    # Reanudar el servicio SIEMPRE al salir
+    atexit.register(start_recordplayer)
+
+    # Capturar Ctrl+C y señales de kill
+    signal.signal(signal.SIGINT, cleanup_and_exit)
+    signal.signal(signal.SIGTERM, cleanup_and_exit)
+
     main()

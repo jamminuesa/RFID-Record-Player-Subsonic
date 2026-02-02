@@ -136,6 +136,10 @@ class SubsonicController:
             return
 
         print(f"▶️ Nueva etiqueta detectada: {uri}")
+        # 🔥 PARAR completamente la lista anterior
+        self.list_player.stop()
+        self.player.stop()  # doble seguro
+
         self.current_uri = uri
 
         # 1. Obtener canciones

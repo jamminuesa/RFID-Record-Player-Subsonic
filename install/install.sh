@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 echo "==========================================="
-echo "   INSTALADOR DE RPI NAVIDROME PLAYER      "
+echo "   INSTALADOR DE RPI SUBSONIC PLAYER      "
 echo "==========================================="
 echo "📂 Directorio del proyecto detectado: $PROJECT_ROOT"
 
@@ -18,16 +18,29 @@ fi
 
 # 1. ACTUALIZAR E INSTALAR DEPENDENCIAS DE SISTEMA
 echo "📦 Instalando dependencias del sistema (VLC, Bluetooth, Python)..."
-sudo apt-get install -y swig liblgpio-dev \
-    vlc \
-    bluez pulseaudio-module-bluetooth \
-    git > /dev/null
+sudo apt update
+sudo apt install -y \
+    swig liblgpio-dev \
+    python3-venv python3-pip python3-dev\
+    vlc libvlc-dev \
+    bluez pulseaudio pulseaudio-module-bluetooth
+
+echo "bust👤 Añadiendo usuario a grupos de audio y bluetooth..."
+sudo usermod -a -G gpio,audio,bluetooth $USER
 
 # 2. ARREGLAR BLOQUEO DE BLUETOOTH (Tu petición)
 echo "🔓 Desbloqueando RFKill para Bluetooth..."
 sudo rfkill unblock bluetooth
 sudo systemctl enable bluetooth
 sudo systemctl start bluetooth
+
+# 5. CONFIGURAR PULSEAUDIO (Modo System-Wide para Headless)
+# Esto permite que PulseAudio arranque sin un usuario logueado gráficamente
+if ! grep -q "load-module module-switch-on-connect" /etc/pulse/default.pa; then
+    echo "🔊 Configurando auto-conexión de audio..."
+    # Auto-conectar a dispositivos bluetooth cuando se enciendan
+    echo "load-module module-switch-on-connect" | sudo tee -a /etc/pulse/default.pa
+fi
 
 if [ ! -d "$PROJECT_ROOT/venv" ]; then
     echo "🐍 Creando entorno virtual en $PROJECT_ROOT/venv..."
